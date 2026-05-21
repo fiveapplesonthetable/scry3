@@ -61,8 +61,13 @@ fn entry_files(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(v)
 }
 
-/// Scan one entries file for (name, ticket) pairs.
-fn scan_file(entrystream: &Path, file: &Path, out: &mut BTreeSet<(String, String)>) -> Result<()> {
+/// Scan one entries file for (name, ticket) pairs. Shared by the standalone
+/// `name-index` builder and the streaming `index-stream` pipeline.
+pub(crate) fn scan_file(
+    entrystream: &Path,
+    file: &Path,
+    out: &mut BTreeSet<(String, String)>,
+) -> Result<()> {
     let f = std::fs::File::open(file).with_context(|| format!("open {}", file.display()))?;
     let mut child = Command::new(entrystream)
         .arg("--write_format=json")
@@ -150,21 +155,25 @@ pub fn build(args: NameIndexArgs<'_>) -> Result<()> {
     });
 
     let set = merged.into_inner().unwrap();
-    let f = std::fs::File::create(args.out)
-        .with_context(|| format!("create {}", args.out.display()))?;
-    let mut w = std::io::BufWriter::new(f);
-    for (name, ticket) in &set {
-        // BTreeSet is already sorted by (name, ticket) — exactly the order
-        // a binary-search lookup wants.
-        writeln!(w, "{name}\t{ticket}")?;
-    }
-    w.flush()?;
+    write_index(&set, args.out)?;
     eprintln!(
         "[name-index] {} (name,ticket) pairs → {} in {:.1}s",
         set.len(),
         args.out.display(),
         t0.elapsed().as_secs_f64()
     );
+    Ok(())
+}
+
+/// Write a sorted `name<TAB>ticket` index file. The set is already in
+/// `(name, ticket)` order — exactly what binary-search lookup wants.
+pub(crate) fn write_index(set: &BTreeSet<(String, String)>, out: &Path) -> Result<()> {
+    let f = std::fs::File::create(out).with_context(|| format!("create {}", out.display()))?;
+    let mut w = std::io::BufWriter::new(f);
+    for (name, ticket) in set {
+        writeln!(w, "{name}\t{ticket}")?;
+    }
+    w.flush()?;
     Ok(())
 }
 

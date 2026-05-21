@@ -43,9 +43,11 @@ scry3 --serving SERVING --http localhost:8089 def android::Parcel::writeStrongBi
 
 ```
 # build pipeline
-scry3 index      --kzip K --out-entries DIR [--in path,...] [--langs ...] [--resume]
-scry3 build      --entries DIR --out SERVING [--mode sorted|graphstore|beam]
-scry3 name-index --entries DIR --out names.idx
+scry3 index        --kzip K --out-entries DIR [--in path,...] [--langs ...] [--resume]
+scry3 build        --entries DIR --out SERVING [--mode sorted|graphstore|beam]
+scry3 name-index   --entries DIR --out names.idx
+# …or, for AOSP scale, one bounded-disk pass (index → GraphStore → serving + names):
+scry3 index-stream --kzip K --out SERVING [--in path,...] [--langs ...]
 
 # query  (NAME resolves via the name index; a kythe:// ticket passes through)
 scry3 def NAME [--substr] [--in S] [--not-in S]    # definition site(s)
@@ -87,8 +89,17 @@ javac compiling each TU, the multi-hour AOSP cost; neither tool changes it.
   niche. Full reasoning + "where else to shave overhead" in
   [docs/COMPARISON.md](docs/COMPARISON.md).
 
+## Scale (AOSP)
+
+The plain `index`+`build` path writes all entries to disk first — multiple TB
+at AOSP scale. Use **`index-stream`** instead: it streams each CU straight
+into a deduping GraphStore and deletes the per-CU file, so peak disk is the
+GraphStore + serving table and **peak RAM is single-digit GB** (measured 2 GB
+on the smoke, vs scry2's ~103 GB). See [docs/SCALING.md](docs/SCALING.md).
+
 ## Docs
 
+* [docs/SCALING.md](docs/SCALING.md) — disk/RAM at AOSP scale and the `index-stream` bounded-disk path.
 * [docs/PIPELINE.md](docs/PIPELINE.md) — kzip → serving table; why **non-beam** `write_tables`, and `graphstore` for all of AOSP.
 * [docs/COMPARISON.md](docs/COMPARISON.md) — full benchmarks, why-slow analysis, and the scry2 verdict.
 * [docs/AOSP.md](docs/AOSP.md) — end-to-end on a real AOSP slice.

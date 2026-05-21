@@ -20,6 +20,7 @@ mod kzip;
 mod marked_source;
 mod nameindex;
 mod query;
+mod stream;
 mod ticket;
 
 use anyhow::{Context, Result};
@@ -107,6 +108,41 @@ enum Cmd {
         work: Option<PathBuf>,
         #[arg(long)]
         keep_intermediate: bool,
+    },
+
+    /// index-stream — kzip → serving table in ONE pass with bounded disk:
+    /// each CU's entries are streamed straight into a GraphStore (deduped on
+    /// disk) and deleted, never materializing the full entry set. The
+    /// AOSP-scale path. Also builds the name index in the same pass.
+    IndexStream {
+        #[arg(long)]
+        kzip: PathBuf,
+        /// Output serving table directory.
+        #[arg(short, long)]
+        out: PathBuf,
+        /// GraphStore scratch dir (LevelDB). Default <out>.graphstore.
+        #[arg(long)]
+        graphstore: Option<PathBuf>,
+        /// Name index output. Default <out>/scry3.names.idx. Empty to skip.
+        #[arg(long)]
+        names: Option<PathBuf>,
+        #[arg(long, default_value = "cxx,java,jvm,go,proto,textproto")]
+        langs: String,
+        #[arg(long, default_value = "8g")]
+        jvm_heap: String,
+        #[arg(long = "in", value_name = "SUBSTR", num_args = 1.., value_delimiter = ',')]
+        in_: Vec<String>,
+        #[arg(long = "not-in", value_name = "SUBSTR", num_args = 1.., value_delimiter = ',')]
+        not_in: Vec<String>,
+        #[arg(long)]
+        staging: Option<PathBuf>,
+        #[arg(long, default_value = "0")]
+        workers: usize,
+        #[arg(long = "inject-cu-arg", value_name = "PREFIX::ARG")]
+        inject_cu_args: Vec<String>,
+        /// Keep the GraphStore after building (default: delete it).
+        #[arg(long)]
+        keep_graphstore: bool,
     },
 
     /// entries directory → name → ticket index (scry3's sidecar).
@@ -290,6 +326,47 @@ fn main() -> Result<()> {
                 workers: *workers,
                 work: work.as_deref(),
                 keep_intermediate: *keep_intermediate,
+            })
+        }
+        Cmd::IndexStream {
+            kzip,
+            out,
+            graphstore,
+            names,
+            langs,
+            jvm_heap,
+            in_,
+            not_in,
+            staging,
+            workers,
+            inject_cu_args,
+            keep_graphstore,
+        } => {
+            let kythe_root = resolve_kythe_root(&cli)?;
+            let rules = indexer::parse_inject_rules(inject_cu_args)?;
+            let gs = graphstore
+                .clone()
+                .unwrap_or_else(|| out.with_extension("graphstore"));
+            // Default name index to <out>/scry3.names.idx; empty string skips.
+            let names_path: Option<PathBuf> = match names {
+                Some(p) if p.as_os_str().is_empty() => None,
+                Some(p) => Some(p.clone()),
+                None => Some(out.join("scry3.names.idx")),
+            };
+            stream::run(stream::StreamArgs {
+                kzip,
+                kythe_root: &kythe_root,
+                out,
+                names: names_path.as_deref(),
+                graphstore: &gs,
+                langs,
+                jvm_heap,
+                in_,
+                not_in,
+                staging: staging.as_deref(),
+                workers: *workers,
+                inject_rules: &rules,
+                keep_graphstore: *keep_graphstore,
             })
         }
         Cmd::NameIndex { entries, out, workers } => {

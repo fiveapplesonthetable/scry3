@@ -91,7 +91,7 @@ pub fn parse_inject_rules(raw: &[String]) -> Result<Vec<InjectRule>> {
     Ok(out)
 }
 
-fn build_indexer_command(
+pub(crate) fn build_indexer_command(
     kind: IndexerKind,
     kythe_root: &Path,
     cu_kzip: &Path,
@@ -171,7 +171,7 @@ const MAX_FAIL_TAILS: usize = 8;
 const STDERR_TAIL_BYTES: usize = 4096;
 
 /// Read `r` to EOF, keeping only the last `cap` bytes (for failure diag).
-fn drain_tail<R: Read>(mut r: R, cap: usize) -> String {
+pub(crate) fn drain_tail<R: Read>(mut r: R, cap: usize) -> String {
     let mut buf = Vec::with_capacity(cap.min(1 << 16));
     let mut chunk = [0u8; 8192];
     loop {
@@ -190,9 +190,9 @@ fn drain_tail<R: Read>(mut r: R, cap: usize) -> String {
 }
 
 /// RAII: remove a path (file or dir) on drop, including on panic.
-struct CleanupPath {
-    path: PathBuf,
-    is_dir: bool,
+pub(crate) struct CleanupPath {
+    pub(crate) path: PathBuf,
+    pub(crate) is_dir: bool,
 }
 impl Drop for CleanupPath {
     fn drop(&mut self) {
@@ -204,7 +204,7 @@ impl Drop for CleanupPath {
     }
 }
 
-fn num_cpus() -> usize {
+pub(crate) fn num_cpus() -> usize {
     std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
 }
 
