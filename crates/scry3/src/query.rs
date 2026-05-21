@@ -566,6 +566,14 @@ pub fn callgraph(ctx: &Ctx, name: &str, substr: bool, direction: &str, depth: us
         }
         qi += 1;
     }
+    if ctx.json {
+        let arr: Vec<_> = nodes.iter().enumerate().map(|(i, (ticket, parent, ndepth))| {
+            serde_json::json!({"id": i, "parent": parent, "depth": ndepth,
+                "name": label(ctx, ticket), "ticket": ticket, "path": path_of(ticket)})
+        }).collect();
+        println!("{}", serde_json::json!({"name": name, "direction": direction, "depth": depth, "nodes": arr}));
+        return Ok(());
+    }
     println!("callgraph {name} ({direction}, depth {depth}) — {} nodes", nodes.len());
     for (i, (ticket, parent, ndepth)) in nodes.iter().enumerate() {
         let p = if *parent < 0 { "-".to_string() } else { parent.to_string() };
@@ -649,11 +657,21 @@ pub fn stat(ctx: &Ctx) -> Result<()> {
     let bytes: u64 = std::fs::read_dir(&ctx.serving)
         .map(|rd| rd.filter_map(|e| e.ok()).filter_map(|e| e.metadata().ok().map(|m| m.len())).sum())
         .unwrap_or(0);
+    let n_rows = ctx.names.as_ref().map(|i| i.len()).unwrap_or(0);
+    if ctx.json {
+        println!("{}", serde_json::json!({
+            "serving": ctx.serving.display().to_string(),
+            "leveldb_files": n_files,
+            "size_mb": (bytes as f64 / 1e6),
+            "name_index_rows": n_rows,
+        }));
+        return Ok(());
+    }
     println!("serving table: {}", ctx.serving.display());
     println!("  leveldb files : {n_files}");
     println!("  size on disk  : {:.1} MB", bytes as f64 / 1e6);
     match &ctx.names {
-        Some(idx) => println!("  name index    : {} (name,ticket) rows", idx.len()),
+        Some(_) => println!("  name index    : {} (name,ticket) rows", n_rows),
         None => println!("  name index    : (none — build with `scry3 name-index`)"),
     }
     Ok(())
