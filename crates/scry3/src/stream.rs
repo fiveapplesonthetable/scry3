@@ -60,6 +60,28 @@ pub struct StreamArgs<'a> {
     pub workers: usize,
     pub inject_rules: &'a [InjectRule],
     pub keep_graphstore: bool,
+    /// Continue a killed run: reuse the existing GraphStore and skip CUs
+    /// already recorded in `<graphstore>.done`.
+    pub resume: bool,
+}
+
+/// Append the folded CUs' shas (entry-file stems) to the durable done log.
+/// Folding into the GraphStore is idempotent, so a crash between fold and
+/// log just re-folds the CU on resume — safe.
+fn append_done(done_path: &Path, batch: &[PathBuf]) -> Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(done_path)
+        .with_context(|| format!("open {}", done_path.display()))?;
+    for p in batch {
+        if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+            writeln!(f, "{stem}")?;
+        }
+    }
+    f.flush()?;
+    Ok(())
 }
 
 #[derive(Default)]
@@ -69,6 +91,25 @@ struct Stats {
     failed: usize,
     folded: usize,
     fail_tails: Vec<String>,
+}
+
+/// In-memory (name,ticket) set plus a durable append-log behind it.
+struct NameSink {
+    set: BTreeSet<(String, String)>,
+    file: Option<std::io::BufWriter<std::fs::File>>,
+}
+impl NameSink {
+    /// Insert new pairs and append the genuinely-new ones to the durable log.
+    fn add(&mut self, pairs: BTreeSet<(String, String)>) {
+        use std::io::Write;
+        for (n, t) in pairs {
+            if self.set.insert((n.clone(), t.clone())) {
+                if let Some(f) = self.file.as_mut() {
+                    let _ = writeln!(f, "{n}\t{t}");
+                }
+            }
+        }
+    }
 }
 
 fn dir_size(p: &Path) -> u64 {
@@ -124,8 +165,26 @@ pub fn run(args: StreamArgs<'_>) -> Result<()> {
     if args.out.exists() {
         bail!("--out {} already exists; remove it first", args.out.display());
     }
+    let done_path = {
+        let mut p = args.graphstore.as_os_str().to_os_string();
+        p.push(".done");
+        PathBuf::from(p)
+    };
+    let mut done_shas: std::collections::HashSet<String> = std::collections::HashSet::new();
     if args.graphstore.exists() {
-        bail!("--graphstore {} already exists; remove it first", args.graphstore.display());
+        if !args.resume {
+            bail!("--graphstore {} already exists; pass --resume to continue, or remove it",
+                args.graphstore.display());
+        }
+        if let Ok(s) = std::fs::read_to_string(&done_path) {
+            for line in s.lines() {
+                let t = line.trim();
+                if !t.is_empty() {
+                    done_shas.insert(t.to_string());
+                }
+            }
+        }
+        eprintln!("[stream] --resume: reusing graphstore, {} CUs already folded", done_shas.len());
     }
     let write_entries = args.kythe_root.join("tools/write_entries");
     let write_tables = args.kythe_root.join("tools/write_tables");
@@ -163,9 +222,16 @@ pub fn run(args: StreamArgs<'_>) -> Result<()> {
         }
         plan.push((kind, u));
     }
+    if !done_shas.is_empty() {
+        let before = plan.len();
+        plan.retain(|(_, u)| !done_shas.contains(&u.sha));
+        eprintln!("[stream] --resume: skipped {} already-folded CUs", before - plan.len());
+    }
     eprintln!("[stream] plan: {} CUs", plan.len());
     if plan.is_empty() {
-        bail!("nothing to index after filters");
+        // Everything already folded; fall through to write_tables on the
+        // existing graphstore (still need the serving table + name index).
+        eprintln!("[stream] all CUs already folded; building serving table from graphstore");
     }
 
     let staging = args.staging.map(|p| p.to_path_buf()).unwrap_or_else(|| {
@@ -179,7 +245,36 @@ pub fn run(args: StreamArgs<'_>) -> Result<()> {
     eprintln!("[stream] workers={workers} staging={}", staging.display());
 
     // ---- shared state -----------------------------------------------------
-    let names_set: Mutex<BTreeSet<(String, String)>> = Mutex::new(BTreeSet::new());
+    let want_names = args.names.is_some();
+    // Durable name sink: the (name,ticket) set is also appended to
+    // `<graphstore>.names` as it grows, and preloaded from there on --resume,
+    // so a killed run never loses the names of already-folded CUs.
+    let names_durable = {
+        let mut p = args.graphstore.as_os_str().to_os_string();
+        p.push(".names");
+        PathBuf::from(p)
+    };
+    let name_sink: Mutex<NameSink> = {
+        let mut set = BTreeSet::new();
+        let mut file = None;
+        if want_names {
+            if let Ok(s) = std::fs::read_to_string(&names_durable) {
+                for line in s.lines() {
+                    if let Some((n, t)) = line.split_once('\t') {
+                        set.insert((n.to_string(), t.to_string()));
+                    }
+                }
+                if !set.is_empty() {
+                    eprintln!("[stream] --resume: preloaded {} name rows", set.len());
+                }
+            }
+            let f = std::fs::OpenOptions::new()
+                .create(true).append(true).open(&names_durable)
+                .with_context(|| format!("open {}", names_durable.display()))?;
+            file = Some(std::io::BufWriter::new(f));
+        }
+        Mutex::new(NameSink { set, file })
+    };
     let stats = Mutex::new(Stats::default());
     let done = AtomicUsize::new(0);
     let plan_total = plan.len();
@@ -189,9 +284,9 @@ pub fn run(args: StreamArgs<'_>) -> Result<()> {
 
     let plan_ref = &plan;
     let stats_ref = &stats;
-    let names_ref = &names_set;
+    let names_ref = &name_sink;
     let done_ref = &done;
-    let want_names = args.names.is_some();
+    let done_path_ref = &done_path;
 
     std::thread::scope(|s| -> Result<()> {
         // ---- folder (single GraphStore writer) ----
@@ -209,6 +304,7 @@ pub fn run(args: StreamArgs<'_>) -> Result<()> {
                 batch.push(path);
                 if batch.len() >= BATCH_FILES || batch_bytes >= BATCH_BYTES {
                     fold_batch(we, gs, &batch, 4)?;
+                    append_done(done_path_ref, &batch)?;
                     folded += batch.len();
                     batch.clear();
                     batch_bytes = 0;
@@ -223,6 +319,7 @@ pub fn run(args: StreamArgs<'_>) -> Result<()> {
                 }
             }
             fold_batch(we, gs, &batch, 4)?;
+            append_done(done_path_ref, &batch)?;
             folded += batch.len();
             Ok(folded)
         });
@@ -243,7 +340,6 @@ pub fn run(args: StreamArgs<'_>) -> Result<()> {
                         return;
                     }
                 };
-                let mut local_names: BTreeSet<(String, String)> = BTreeSet::new();
                 let mut i = w_id;
                 while i < plan_ref.len() {
                     let (kind, unit) = plan_ref[i];
@@ -327,10 +423,15 @@ pub fn run(args: StreamArgs<'_>) -> Result<()> {
                         stats_ref.lock().unwrap().empty += 1;
                         continue;
                     }
-                    // Names: scan before handing the file to the folder (which
-                    // will delete it). Cheap, parallel across workers.
+                    // Names: scan and DURABLY persist before handing the file
+                    // to the folder (which deletes it) — so a CU's names are on
+                    // disk before it can be folded, keeping --resume complete.
                     if want_names {
-                        let _ = nameindex::scan_file(entrystream, &ent, &mut local_names);
+                        let mut cu_names = BTreeSet::new();
+                        let _ = nameindex::scan_file(entrystream, &ent, &mut cu_names);
+                        if !cu_names.is_empty() {
+                            names_ref.lock().unwrap().add(cu_names);
+                        }
                     }
                     stats_ref.lock().unwrap().ok += 1;
                     // Backpressure: blocks if the folder is behind, bounding
@@ -339,9 +440,6 @@ pub fn run(args: StreamArgs<'_>) -> Result<()> {
                     if tx.send(ent).is_err() {
                         break;
                     }
-                }
-                if want_names && !local_names.is_empty() {
-                    names_ref.lock().unwrap().extend(local_names);
                 }
             });
         }
@@ -383,13 +481,15 @@ pub fn run(args: StreamArgs<'_>) -> Result<()> {
 
     // ---- name index -------------------------------------------------------
     if let Some(npath) = args.names {
-        let set = names_set.into_inner().unwrap();
-        nameindex::write_index(&set, npath)?;
-        eprintln!("[stream] name index: {} rows → {}", set.len(), npath.display());
+        let sink = name_sink.into_inner().unwrap();
+        nameindex::write_index(&sink.set, npath)?;
+        eprintln!("[stream] name index: {} rows → {}", sink.set.len(), npath.display());
     }
 
     if !args.keep_graphstore {
         let _ = std::fs::remove_dir_all(args.graphstore);
+        let _ = std::fs::remove_file(&done_path);
+        let _ = std::fs::remove_file(&names_durable);
     }
     let _ = std::fs::remove_dir_all(&staging);
     eprintln!(

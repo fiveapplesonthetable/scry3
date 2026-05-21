@@ -81,10 +81,31 @@ the dominant cost and is inherent to stock Kythe's rich serving format — the
 price of snippets/decorations/all-edge-kinds. Full AOSP scales up
 proportionally; use `--in` to scope to the layers worth querying.
 
-## Caveats / next steps
+## Resume (`--resume`)
 
-* **No `--resume` yet** for `index-stream` (the on-disk GraphStore makes
-  resume more involved than the entries-dir model's "skip existing file").
-  A killed run currently restarts; tracked as a follow-up.
+`index-stream` resumes a killed run seamlessly, like scry2's `from-kzip
+--resume`:
+
+```bash
+scry3 index-stream --kzip aosp-norm.kzip --out aosp.serving \
+    --in frameworks/base,... --langs cxx,java,jvm --jvm-heap 12g --workers 24 \
+    --resume
+```
+
+Mechanics: as each CU is folded into the GraphStore, its sha is appended to
+`<graphstore>.done` and its names to `<graphstore>.names`. On `--resume` the
+existing GraphStore is reused, the `.done` shas are skipped, and the names are
+preloaded — so the final name index stays complete. Folding into the
+GraphStore is idempotent (re-folding a CU is a no-op), so a crash between
+fold and log is safe. Pair with `--keep-graphstore` so the GraphStore (and
+its resume state) survives until you've confirmed the run.
+
+> The plain `index` path also resumes — it just skips any CU whose
+> `<sha>.entries` already exists.
+
+## Caveats
+
 * The serving-table size estimate is extrapolated from one CU; measure on a
   ~100-CU sample before committing to a full run.
+* `--resume` keeps the GraphStore between runs; pass `--keep-graphstore` on
+  the first run (it's deleted on a clean finish unless you keep it).

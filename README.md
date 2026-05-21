@@ -97,7 +97,16 @@ The plain `index`+`build` path writes all entries to disk first — multiple TB
 at AOSP scale. Use **`index-stream`** instead: it streams each CU straight
 into a deduping GraphStore and deletes the per-CU file, so peak disk is the
 GraphStore + serving table and **peak RAM is single-digit GB** (measured 2 GB
-on the smoke, vs scry2's ~103 GB). See [docs/SCALING.md](docs/SCALING.md).
+on the smoke, vs scry2's ~103 GB). Add `--resume` to continue a killed run
+(reuses the GraphStore, skips `<gs>.done`, preloads names). See
+[docs/SCALING.md](docs/SCALING.md).
+
+**Throughput vs OOM:** `--workers` (default half the cores, like scry2) bounds
+concurrent indexer subprocesses — the memory ceiling is
+`(concurrent JVM indexers × --jvm-heap) + (cxx_indexer RSS × workers)`.
+Everything else (GraphStore fold, name set, serving build) is streamed/bounded.
+Raise `--workers` for throughput; lower it or `--jvm-heap` to stay under RAM.
+Example on a 157 GB box: `--workers 24 --jvm-heap 12g --keep-graphstore`.
 
 ## Docs
 

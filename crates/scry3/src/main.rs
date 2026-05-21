@@ -143,6 +143,10 @@ enum Cmd {
         /// Keep the GraphStore after building (default: delete it).
         #[arg(long)]
         keep_graphstore: bool,
+        /// Continue a killed run: reuse the existing GraphStore and skip CUs
+        /// already folded (recorded in <graphstore>.done).
+        #[arg(long)]
+        resume: bool,
     },
 
     /// entries directory → name → ticket index (scry3's sidecar).
@@ -373,6 +377,7 @@ fn main() -> Result<()> {
             workers,
             inject_cu_args,
             keep_graphstore,
+            resume,
         } => {
             let kythe_root = resolve_kythe_root(&cli)?;
             let rules = indexer::parse_inject_rules(inject_cu_args)?;
@@ -399,6 +404,7 @@ fn main() -> Result<()> {
                 workers: *workers,
                 inject_rules: &rules,
                 keep_graphstore: *keep_graphstore,
+                resume: *resume,
             })
         }
         Cmd::NameIndex { entries, out, workers } => {
