@@ -1,0 +1,13 @@
+diff --git a/kythe/java/com/google/devtools/kythe/analyzers/jvm/KytheClassVisitor.java b/kythe/java/com/google/devtools/kythe/analyzers/jvm/KytheClassVisitor.java
+index 81997c2..393155d 100644
+--- a/kythe/java/com/google/devtools/kythe/analyzers/jvm/KytheClassVisitor.java
++++ b/kythe/java/com/google/devtools/kythe/analyzers/jvm/KytheClassVisitor.java
+@@ -33,7 +33,7 @@ import org.objectweb.asm.Opcodes;
+ 
+ /** JVM class visitor emitting Kythe graph facts. */
+ public final class KytheClassVisitor extends ClassVisitor {
+-  private static final int ASM_API_LEVEL = Opcodes.ASM7;
++  private static final int ASM_API_LEVEL = Opcodes.ASM9;
+ 
+   private final JvmGraph jvmGraph;
+   private final KytheEntrySets entrySets;

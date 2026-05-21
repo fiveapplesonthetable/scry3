@@ -1,0 +1,47 @@
+diff --git a/kythe/java/com/google/devtools/kythe/analyzers/jvm/ClassFileIndexer.java b/kythe/java/com/google/devtools/kythe/analyzers/jvm/ClassFileIndexer.java
+index ac7f2a0..e746600 100644
+--- a/kythe/java/com/google/devtools/kythe/analyzers/jvm/ClassFileIndexer.java
++++ b/kythe/java/com/google/devtools/kythe/analyzers/jvm/ClassFileIndexer.java
+@@ -90,6 +90,17 @@ public class ClassFileIndexer {
+       KytheClassVisitor classVisitor =
+           new KytheClassVisitor(
+               statistics == null ? NullStatisticsCollector.getInstance() : statistics, emitter);
++      // scry patch: --default_corpus sets the corpus field on all VNames
++      // generated for raw .jar/.class inputs (where there's no enclosing
++      // CompilationUnit to supply one). Required for cross-CU merging in
++      // write_tables — java_indexer's output uses the corpus from the
++      // build kzip's VName rules, and the JVM-FQN bridge only fires when
++      // both sides share the same (corpus, signature, language) tuple.
++      String defaultCorpus = config.getDefaultCorpus();
++      if (defaultCorpus != null && !defaultCorpus.isEmpty()) {
++        VName syntheticJarVName = VName.newBuilder().setCorpus(defaultCorpus).build();
++        classVisitor = classVisitor.withEnclosingJarFile(syntheticJarVName);
++      }
+       for (String fileName : config.getFilesToIndex()) {
+         File file = new File(fileName);
+         if (fileName.endsWith(JAR_FILE_EXT)) {
+@@ -253,6 +264,14 @@ public class ClassFileIndexer {
+         description = "Ignore empty .kzip files; exit successfully with no output")
+     private boolean ignoreEmptyKZip;
+ 
++    @Parameter(
++        names = "--default_corpus",
++        description =
++            "Corpus to assign to all VNames generated for raw .jar/.class inputs. "
++                + "Required for cross-CU merging with java_indexer output that uses a "
++                + "specific build corpus.")
++    private String defaultCorpus;
++
+     public StandaloneConfig() {
+       super("classfile-indexer");
+     }
+@@ -272,5 +291,9 @@ public class ClassFileIndexer {
+     public final List<String> getFilesToIndex() {
+       return filesToIndex;
+     }
++
++    public final String getDefaultCorpus() {
++      return defaultCorpus;
++    }
+   }
+ }

@@ -1,0 +1,6 @@
+target/
+*.entries
+*.s2db
+*.names.idx
+names.idx
+Cargo.lock.bak

@@ -1,0 +1,16 @@
+[package]
+name = "scry3"
+version.workspace = true
+edition.workspace = true
+description = "Stock-Kythe wrapper for AOSP: kzip → entries → serving table → blazing-fast cmdline xrefs"
+
+[[bin]]
+name = "scry3"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zip.workspace = true

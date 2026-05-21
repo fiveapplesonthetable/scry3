@@ -1,0 +1,76 @@
+diff --git a/kythe/java/com/google/devtools/kythe/platform/java/filemanager/CompilationUnitPathFileManager.java b/kythe/java/com/google/devtools/kythe/platform/java/filemanager/CompilationUnitPathFileManager.java
+index 6295f7a..8c92a34 100644
+--- a/kythe/java/com/google/devtools/kythe/platform/java/filemanager/CompilationUnitPathFileManager.java
++++ b/kythe/java/com/google/devtools/kythe/platform/java/filemanager/CompilationUnitPathFileManager.java
+@@ -105,7 +105,56 @@ public final class CompilationUnitPathFileManager extends ForwardingStandardJava
+     setLocations(
+         findJavaDetails(compilationUnit)
+             .map(details -> toLocationMap(details))
+-            .orElseGet(() -> logMissingDetailsMap()));
++            .orElseGet(() -> deriveLocationMapFromInputs(compilationUnit)));
++  }
++
++  /**
++   * Falls back to a CLASS_PATH derived from the CompilationUnit's required_input list when no
++   * JavaDetails proto extension is present. Walks every {@code required_input} entry whose path
++   * starts with the {@code !CLASS_PATH_JAR!/} convention used by Kythe extractors (and by
++   * downstream consumers like AOSP's {@code build_kzip.bash} that emit raw classpath jar contents
++   * but skip the JavaDetails proto). Each unique virtual jar root (`/!CLASS_PATH_JAR!`,
++   * `/!CLASS_PATH_JAR!.1` ...) is added to {@code StandardLocation.CLASS_PATH} so javac's symbol
++   * resolution can find the bytecode classes that were already shipped with the CU.
++   *
++   * <p>Without this, javac silently fails to resolve any classpath-bytecode reference, which
++   * downstream manifests as missing {@code defines/binding} → {@code named} bridges on
++   * cross-CU calls and breaks {@code write_tables}' corpus-wide FQN merging.
++   */
++  private ImmutableMap<Location, Collection<Path>> deriveLocationMapFromInputs(
++      CompilationUnit unit) {
++    java.util.LinkedHashSet<String> jarRoots = new java.util.LinkedHashSet<>();
++    for (CompilationUnit.FileInput fi : unit.getRequiredInputList()) {
++      String p = fi.getInfo().getPath();
++      if (p.startsWith("!CLASS_PATH_JAR!")) {
++        int slash = p.indexOf('/', "!CLASS_PATH_JAR!".length());
++        // root is the prefix up to but not including the first slash after "!CLASS_PATH_JAR!"
++        // (e.g. "!CLASS_PATH_JAR!" or "!CLASS_PATH_JAR!.1"); javac treats each root as a separate
++        // jar-on-classpath entry.
++        String root = slash < 0 ? p : p.substring(0, slash);
++        jarRoots.add(root);
++      }
++    }
++    if (jarRoots.isEmpty()) {
++      logger.atInfo().log(
++          "Compilation missing JavaDetails and has no !CLASS_PATH_JAR! inputs;"
++              + " falling back to flag parsing.");
++      return defaultLocationMapBuilder().buildOrThrow();
++    }
++    logger.atInfo().log(
++        "Compilation missing JavaDetails; derived CLASS_PATH from %d !CLASS_PATH_JAR! root(s).",
++        jarRoots.size());
++    ImmutableList<Path> classPath =
++        jarRoots.stream()
++            // Match the JavaDetails-supplied form (no leading slash) — see
++            // JavaCompilationUnitExtractor.processJarLikeRequiredInput, which adds the bare jar
++            // root token to JavaDetails.classpath.
++            .map(r -> fileSystem.getPath(r))
++            .collect(ImmutableList.toImmutableList());
++    return defaultLocationMapBuilder()
++        .put(StandardLocation.CLASS_PATH, classPath)
++        .put(StandardLocation.MODULE_PATH, classPath)
++        .buildOrThrow();
+   }
+ 
+   @Override
+@@ -266,7 +315,12 @@ public final class CompilationUnitPathFileManager extends ForwardingStandardJava
+         .put(StandardLocation.CLASS_OUTPUT, ImmutableList.of(classOutputPath()));
+   }
+ 
+-  /** Logs that path handling will fall back to Javac's option parsing. */
++  /**
++   * Logs that path handling will fall back to Javac's option parsing. Retained for callers that
++   * have no classpath data in the CompilationUnit at all (no JavaDetails, no
++   * {@code !CLASS_PATH_JAR!} required_input entries).
++   */
++  @SuppressWarnings("unused")
+   private ImmutableMap<Location, Collection<Path>> logMissingDetailsMap() {
+     // It's expected that extractors which use JavaDetails will remove the corresponding
+     // arguments from the command line.  Those extractors which don't use JavaDetails
