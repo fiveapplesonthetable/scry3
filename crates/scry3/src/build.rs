@@ -99,7 +99,7 @@ pub fn run(args: BuildArgs<'_>) -> Result<()> {
     let work = args.work.map(|p| p.to_path_buf()).unwrap_or_else(|| {
         let base = std::env::var_os("SCRY_TMP_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
+            .unwrap_or_else(|| std::path::PathBuf::from("/mnt/agent/tmp"));
         base.join(format!("scry3-build-{}", std::process::id()))
     });
     std::fs::create_dir_all(&work).with_context(|| format!("mkdir work {}", work.display()))?;

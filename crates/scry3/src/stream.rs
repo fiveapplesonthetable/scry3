@@ -237,7 +237,7 @@ pub fn run(args: StreamArgs<'_>) -> Result<()> {
     let staging = args.staging.map(|p| p.to_path_buf()).unwrap_or_else(|| {
         std::env::var_os("SCRY_TMP_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir)
+            .unwrap_or_else(|| std::path::PathBuf::from("/mnt/agent/tmp"))
             .join(format!("scry3-stream-{}", std::process::id()))
     });
     std::fs::create_dir_all(&staging)?;
