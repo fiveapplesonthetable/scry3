@@ -53,7 +53,8 @@ scry3 index-stream --kzip K --out SERVING [--in path,...] [--langs ...]
 scry3 def NAME [--substr] [--in S] [--not-in S]    # definition site(s)
 scry3 ref NAME            …                         # every reference
 scry3 callers NAME        …                         # call sites
-scry3 super NAME / sub NAME                          # supertypes / subtypes
+scry3 super NAME / sub NAME   [--in S] [--not-in S]  # supertypes / subtypes
+scry3 callgraph NAME --direction up|down|both --depth N   # transitive call walk
 scry3 identifier NAME / names PREFIX                 # name → ticket
 scry3 edges NAME|TICKET / nodes … / decor PATH / ls # raw graph passthrough
 scry3 stat                                           # serving + index health

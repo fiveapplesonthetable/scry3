@@ -319,48 +319,37 @@ pub fn callers(ctx: &Ctx, name: &str, substr: bool, filter: &Filter) -> Result<(
     Ok(())
 }
 
-/// `super` / `sub` — supertypes / subtypes via the inheritance edges.
-/// `super` follows the forward edges; `sub` follows their reverse (`%`).
-pub fn inheritance(ctx: &Ctx, name: &str, substr: bool, sub: bool) -> Result<()> {
-    const FWD: &[&str] = &[
-        "/kythe/edge/extends",
-        "/kythe/edge/extends/public",
-        "/kythe/edge/extends/protected",
-        "/kythe/edge/extends/private",
-        "/kythe/edge/overrides",
-        "/kythe/edge/satisfies",
-    ];
-    let owned: Vec<String>;
-    let kinds: Vec<&str> = if sub {
-        owned = FWD.iter().map(|k| format!("%{k}")).collect();
-        owned.iter().map(|s| s.as_str()).collect()
+const INHERIT_FWD: &[&str] = &[
+    "/kythe/edge/extends",
+    "/kythe/edge/extends/public",
+    "/kythe/edge/extends/protected",
+    "/kythe/edge/extends/private",
+    "/kythe/edge/overrides",
+    "/kythe/edge/satisfies",
+];
+
+fn inherit_kinds(sub: bool) -> Vec<String> {
+    if sub {
+        INHERIT_FWD.iter().map(|k| format!("%{k}")).collect()
     } else {
-        FWD.to_vec()
-    };
-    let tickets = resolve(ctx, name, substr)?;
-    let verb = if sub { "sub" } else { "super" };
-    let mut total = 0;
-    for t in &tickets {
-        let reply = edges_for(ctx, t, &kinds)?;
-        if ctx.json {
-            println!("{}", serde_json::to_string(&reply)?);
-            continue;
-        }
-        if let Some(sets) = reply.get("edge_sets").and_then(|v| v.as_object()) {
-            for set in sets.values() {
-                if let Some(groups) = set.get("groups").and_then(|v| v.as_object()) {
-                    for grp in groups.values() {
-                        if let Some(edges) = grp.get("edge").and_then(|v| v.as_array()) {
-                            for e in edges {
-                                if let Some(tt) = e.get("target_ticket").and_then(|v| v.as_str()) {
-                                    if total == 0 {
-                                        println!("{verb} {name} [{}]", sig_of(t));
-                                    }
-                                    println!("  {}  [{}]", sig_of(tt), path_of(tt));
-                                    total += 1;
-                                    if total >= ctx.limit {
-                                        return Ok(());
-                                    }
+        INHERIT_FWD.iter().map(|k| k.to_string()).collect()
+    }
+}
+
+/// Deduped target tickets of `ticket` over `kinds`.
+fn edge_targets(ctx: &Ctx, ticket: &str, kinds: &[&str]) -> Result<Vec<String>> {
+    let reply = edges_for(ctx, ticket, kinds)?;
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    if let Some(sets) = reply.get("edge_sets").and_then(|v| v.as_object()) {
+        for set in sets.values() {
+            if let Some(groups) = set.get("groups").and_then(|v| v.as_object()) {
+                for grp in groups.values() {
+                    if let Some(edges) = grp.get("edge").and_then(|v| v.as_array()) {
+                        for e in edges {
+                            if let Some(tt) = e.get("target_ticket").and_then(|v| v.as_str()) {
+                                if seen.insert(tt.to_string()) {
+                                    out.push(tt.to_string());
                                 }
                             }
                         }
@@ -369,8 +358,177 @@ pub fn inheritance(ctx: &Ctx, name: &str, substr: bool, sub: bool) -> Result<()>
             }
         }
     }
+    Ok(out)
+}
+
+/// `super` / `sub` — supertypes / subtypes via the inheritance edges.
+/// `super` follows the forward edges; `sub` follows their reverse (`%`).
+pub fn inheritance(ctx: &Ctx, name: &str, substr: bool, sub: bool, filter: &Filter) -> Result<()> {
+    let owned = inherit_kinds(sub);
+    let kinds: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
+    let tickets = resolve(ctx, name, substr)?;
+    let verb = if sub { "sub" } else { "super" };
+    let mut total = 0;
+    for t in &tickets {
+        let targets = edge_targets(ctx, t, &kinds)?;
+        if ctx.json {
+            println!("{}", serde_json::json!({"name": name, "ticket": t, "targets": targets}));
+            total += targets.len();
+            continue;
+        }
+        for tt in targets {
+            let p = path_of(&tt);
+            if !filter.keep(&p) {
+                continue;
+            }
+            if total == 0 {
+                println!("{verb} {name} [{}]", sig_of(t));
+            }
+            println!("  {}  [{}]", sig_of(&tt), p);
+            total += 1;
+            if total >= ctx.limit {
+                break;
+            }
+        }
+    }
     if !ctx.json && total == 0 {
         println!("(no {verb}types)");
+    }
+    Ok(())
+}
+
+/// Semantic callers of `ticket` (functions whose bodies call it).
+fn callers_of(ctx: &Ctx, ticket: &str) -> Result<Vec<String>> {
+    let reply = xrefs_for(ctx, ticket, "none", "none", "direct")?;
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    if let Some(crs) = reply.get("cross_references").and_then(|v| v.as_object()) {
+        for set in crs.values() {
+            if let Some(arr) = set.get("caller").and_then(|v| v.as_array()) {
+                for ra in arr {
+                    if let Some(tk) = ra.get("ticket").and_then(|v| v.as_str()) {
+                        if seen.insert(tk.to_string()) {
+                            out.push(tk.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Decorations (references) of a file ticket — via the warm server's
+/// /decorations endpoint, or the `kythe decor` CLI. Returns
+/// (target_ticket, kind, start_byte) tuples.
+fn decor_refs(ctx: &Ctx, file_ticket: &str) -> Result<Vec<(String, String, u64)>> {
+    let reply = if ctx.http.is_some() {
+        let body = serde_json::json!({"location": {"ticket": file_ticket}, "references": true})
+            .to_string();
+        ctx.http_post("decorations", &body).unwrap()?
+    } else {
+        let mut c = ctx.kythe();
+        c.arg("decor").arg(file_ticket);
+        run_json(c)?
+    };
+    let mut out = Vec::new();
+    if let Some(refs) = reply.get("reference").and_then(|v| v.as_array()) {
+        for r in refs {
+            let tt = r.get("target_ticket").and_then(|v| v.as_str()).unwrap_or("");
+            let kind = r.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+            let start = r
+                .get("span").and_then(|s| s.get("start")).and_then(|s| s.get("byte_offset"))
+                .and_then(|v| v.as_u64()).unwrap_or(0);
+            if !tt.is_empty() {
+                out.push((tt.to_string(), kind.to_string(), start));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Callees of `ticket`: decorate its definition body span and collect
+/// /kythe/edge/ref/call targets within it.
+fn callees_of(ctx: &Ctx, ticket: &str) -> Result<Vec<String>> {
+    let def = xrefs_for(ctx, ticket, "all", "none", "none")?;
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    if let Some(crs) = def.get("cross_references").and_then(|v| v.as_object()) {
+        for set in crs.values() {
+            for ra in set.get("definition").and_then(|v| v.as_array()).into_iter().flatten() {
+                let anchor = match ra.get("anchor") {
+                    Some(a) => a,
+                    None => continue,
+                };
+                let file = anchor.get("parent").and_then(|v| v.as_str()).unwrap_or("");
+                let span = anchor.get("span");
+                let ds = span.and_then(|s| s.get("start")).and_then(|s| s.get("byte_offset")).and_then(|v| v.as_u64());
+                let de = span.and_then(|s| s.get("end")).and_then(|s| s.get("byte_offset")).and_then(|v| v.as_u64());
+                if file.is_empty() {
+                    continue;
+                }
+                let (ds, de) = match (ds, de) {
+                    (Some(a), Some(b)) => (a, b),
+                    _ => (0, u64::MAX),
+                };
+                for (tt, kind, start) in decor_refs(ctx, file)? {
+                    if kind.contains("ref/call") && start >= ds && start < de && seen.insert(tt.clone()) {
+                        out.push(tt);
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn cg_next(ctx: &Ctx, ticket: &str, dir: &str) -> Result<Vec<String>> {
+    Ok(match dir {
+        "up" => callers_of(ctx, ticket)?,
+        "down" => callees_of(ctx, ticket)?,
+        _ => {
+            let mut v = callers_of(ctx, ticket)?;
+            v.extend(callees_of(ctx, ticket)?);
+            v
+        }
+    })
+}
+
+/// `callgraph NAME --direction up|down|both --depth N` — transitive walk,
+/// printed as an indented tree with cycle detection.
+pub fn callgraph(ctx: &Ctx, name: &str, substr: bool, direction: &str, depth: usize, filter: &Filter) -> Result<()> {
+    if !matches!(direction, "up" | "down" | "both") {
+        bail!("--direction must be up|down|both");
+    }
+    let mut visited = std::collections::HashSet::new();
+    for t in resolve(ctx, name, substr)? {
+        println!("callgraph {name} ({direction}, depth {depth}) [{}]", sig_of(&t));
+        cg_walk(ctx, &t, direction, depth, 1, &mut visited, filter)?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cg_walk(
+    ctx: &Ctx,
+    ticket: &str,
+    dir: &str,
+    max_depth: usize,
+    cur: usize,
+    visited: &mut std::collections::HashSet<String>,
+    filter: &Filter,
+) -> Result<()> {
+    if cur > max_depth || !visited.insert(ticket.to_string()) {
+        return Ok(());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for nx in cg_next(ctx, ticket, dir)? {
+        let p = path_of(&nx);
+        if !seen.insert(nx.clone()) || !filter.keep(&p) {
+            continue;
+        }
+        println!("{}{}  [{}]", "  ".repeat(cur), sig_of(&nx), p);
+        cg_walk(ctx, &nx, dir, max_depth, cur + 1, visited, filter)?;
     }
     Ok(())
 }
@@ -467,7 +625,7 @@ pub fn stat(ctx: &Ctx) -> Result<()> {
 pub fn repl(ctx: &Ctx) -> Result<()> {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
-    eprintln!("[repl] ready (verbs: def ref callers super sub identifier edges nodes; ^D to exit)");
+    eprintln!("[repl] ready (verbs: def ref callers super sub callgraph identifier edges nodes; ^D to exit)");
     for line in stdin.lock().lines() {
         let line = line?;
         let line = line.trim();
@@ -479,27 +637,32 @@ pub fn repl(ctx: &Ctx) -> Result<()> {
         let substr = toks.iter().any(|t| *t == "--substr");
         let mut filter = Filter::default();
         let mut name: Option<String> = None;
+        let mut direction = "up".to_string();
+        let mut depth = 3usize;
         let mut i = 1;
         while i < toks.len() {
             match toks[i] {
                 "--substr" => {}
                 "--in" => { i += 1; filter.in_ = toks.get(i).map(|s| s.to_string()); }
                 "--not-in" => { i += 1; filter.not_in = toks.get(i).map(|s| s.to_string()); }
+                "--direction" => { i += 1; if let Some(d) = toks.get(i) { direction = d.to_string(); } }
+                "--depth" => { i += 1; if let Some(d) = toks.get(i) { depth = d.parse().unwrap_or(3); } }
                 other if name.is_none() => name = Some(other.to_string()),
                 _ => {}
             }
             i += 1;
         }
         let Some(name) = name else {
-            eprintln!("[repl] usage: <verb> <name> [--substr] [--in S] [--not-in S]");
+            eprintln!("[repl] usage: <verb> <name> [--substr --in S --not-in S --direction up|down|both --depth N]");
             continue;
         };
         let r = match verb {
             "def" => def(ctx, &name, substr, &filter),
             "ref" => references(ctx, &name, substr, &filter),
             "callers" => callers(ctx, &name, substr, &filter),
-            "super" => inheritance(ctx, &name, substr, false),
-            "sub" => inheritance(ctx, &name, substr, true),
+            "super" => inheritance(ctx, &name, substr, false, &filter),
+            "sub" => inheritance(ctx, &name, substr, true, &filter),
+            "callgraph" => callgraph(ctx, &name, substr, &direction, depth, &filter),
             "identifier" | "names" => identifier(ctx, &name, substr || verb == "names"),
             "edges" => edges(ctx, &name, None),
             "nodes" => nodes(ctx, &name),

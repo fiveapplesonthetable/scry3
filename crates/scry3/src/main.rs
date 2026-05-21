@@ -190,12 +190,34 @@ enum Cmd {
         name: String,
         #[arg(long)]
         substr: bool,
+        #[arg(long = "in", value_name = "SUBSTR")]
+        in_: Option<String>,
+        #[arg(long = "not-in", value_name = "SUBSTR")]
+        not_in: Option<String>,
     },
     /// sub NAME — direct subtypes.
     Sub {
         name: String,
         #[arg(long)]
         substr: bool,
+        #[arg(long = "in", value_name = "SUBSTR")]
+        in_: Option<String>,
+        #[arg(long = "not-in", value_name = "SUBSTR")]
+        not_in: Option<String>,
+    },
+    /// callgraph NAME — transitive call walk (up=callers, down=callees, both).
+    Callgraph {
+        name: String,
+        #[arg(long)]
+        substr: bool,
+        #[arg(long, default_value = "up")]
+        direction: String,
+        #[arg(long, default_value = "3")]
+        depth: usize,
+        #[arg(long = "in", value_name = "SUBSTR")]
+        in_: Option<String>,
+        #[arg(long = "not-in", value_name = "SUBSTR")]
+        not_in: Option<String>,
     },
     /// identifier NAME — list tickets a name resolves to (scry3 index).
     Identifier {
@@ -390,8 +412,18 @@ fn main() -> Result<()> {
             let f = query::Filter { in_: in_.clone(), not_in: not_in.clone() };
             query::callers(&build_ctx(&cli)?, name, *substr, &f)
         }
-        Cmd::Super { name, substr } => query::inheritance(&build_ctx(&cli)?, name, *substr, false),
-        Cmd::Sub { name, substr } => query::inheritance(&build_ctx(&cli)?, name, *substr, true),
+        Cmd::Super { name, substr, in_, not_in } => {
+            let f = query::Filter { in_: in_.clone(), not_in: not_in.clone() };
+            query::inheritance(&build_ctx(&cli)?, name, *substr, false, &f)
+        }
+        Cmd::Sub { name, substr, in_, not_in } => {
+            let f = query::Filter { in_: in_.clone(), not_in: not_in.clone() };
+            query::inheritance(&build_ctx(&cli)?, name, *substr, true, &f)
+        }
+        Cmd::Callgraph { name, substr, direction, depth, in_, not_in } => {
+            let f = query::Filter { in_: in_.clone(), not_in: not_in.clone() };
+            query::callgraph(&build_ctx(&cli)?, name, *substr, direction, *depth, &f)
+        }
         Cmd::Identifier { name, substr } => query::identifier(&build_ctx(&cli)?, name, *substr),
         Cmd::Names { prefix } => query::identifier(&build_ctx(&cli)?, prefix, true),
         Cmd::Stat => query::stat(&build_ctx(&cli)?),
