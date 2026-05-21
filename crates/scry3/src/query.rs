@@ -24,6 +24,9 @@ use crate::nameindex::NameIndex;
 pub struct Filter {
     pub in_: Option<String>,
     pub not_in: Option<String>,
+    /// Keep only symbols whose *definition* file path contains this. Applied
+    /// at name→ticket resolution (scry2's `--def-in`).
+    pub def_in: Option<String>,
 }
 
 impl Filter {
@@ -120,7 +123,24 @@ fn is_ticket(s: &str) -> bool {
     s.starts_with("kythe:")
 }
 
-fn resolve(ctx: &Ctx, name: &str, substr: bool) -> Result<Vec<String>> {
+/// File path of `ticket`'s definition (for `--def-in`).
+fn def_path(ctx: &Ctx, ticket: &str) -> Option<String> {
+    let reply = xrefs_for(ctx, ticket, "all", "none", "none").ok()?;
+    let crs = reply.get("cross_references")?.as_object()?;
+    for set in crs.values() {
+        for ra in set.get("definition").and_then(|v| v.as_array()).into_iter().flatten() {
+            if let Some(anchor) = ra.get("anchor") {
+                let p = anchor_path(anchor);
+                if !p.is_empty() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn resolve(ctx: &Ctx, name: &str, substr: bool, filter: &Filter, cap: usize) -> Result<Vec<String>> {
     if is_ticket(name) {
         return Ok(vec![name.to_string()]);
     }
@@ -128,13 +148,19 @@ fn resolve(ctx: &Ctx, name: &str, substr: bool) -> Result<Vec<String>> {
         "name resolution needs a name index (build one with `scry3 name-index`, \
          default location <serving>/scry3.names.idx)",
     )?;
-    let tickets: Vec<String> = if substr {
+    let mut tickets: Vec<String> = if substr {
         idx.substr(name, ctx.limit).into_iter().map(|(_, t)| t).collect()
     } else {
         idx.exact(name)
     };
+    if let Some(s) = filter.def_in.as_deref().filter(|s| !s.is_empty()) {
+        tickets.retain(|t| def_path(ctx, t).map(|p| p.contains(s)).unwrap_or(false));
+    }
     if tickets.is_empty() {
-        bail!("no ticket for name {name:?} (try --substr, or `scry3 names {name}`)");
+        bail!("no ticket for name {name:?} (try --substr / check --def-in)");
+    }
+    if cap > 0 && tickets.len() > cap {
+        tickets.truncate(cap);
     }
     Ok(tickets)
 }
@@ -154,6 +180,17 @@ fn sig_of(ticket: &str) -> String {
         .rsplit_once('#')
         .map(|(_, s)| percent_decode(s))
         .unwrap_or_default()
+}
+
+/// Resolve a ticket to a human name via the reverse name index, falling back
+/// to the signature.
+fn label(ctx: &Ctx, ticket: &str) -> String {
+    if let Some(idx) = &ctx.names {
+        if let Some(n) = idx.name_of(ticket) {
+            return n.to_string();
+        }
+    }
+    sig_of(ticket)
 }
 
 fn percent_decode(s: &str) -> String {
@@ -268,14 +305,14 @@ fn edges_for(ctx: &Ctx, ticket: &str, kinds: &[&str]) -> Result<serde_json::Valu
 }
 
 pub fn def(ctx: &Ctx, name: &str, substr: bool, filter: &Filter) -> Result<()> {
-    let tickets = resolve(ctx, name, substr)?;
+    let tickets = resolve(ctx, name, substr, filter, ctx.limit)?;
     let mut total = 0;
     for t in &tickets {
         let reply = xrefs_for(ctx, t, "all", "none", "none")?;
         if ctx.json {
             println!("{}", serde_json::to_string(&reply)?);
         } else {
-            total += print_anchors(&reply, "definition", &format!("def {name} [{}]", sig_of(t)), filter, ctx.limit);
+            total += print_anchors(&reply, "definition", &format!("def {name} [{}]", label(ctx, t)), filter, ctx.limit);
         }
     }
     if !ctx.json && total == 0 {
@@ -285,14 +322,14 @@ pub fn def(ctx: &Ctx, name: &str, substr: bool, filter: &Filter) -> Result<()> {
 }
 
 pub fn references(ctx: &Ctx, name: &str, substr: bool, filter: &Filter) -> Result<()> {
-    let tickets = resolve(ctx, name, substr)?;
+    let tickets = resolve(ctx, name, substr, filter, ctx.limit)?;
     let mut total = 0;
     for t in &tickets {
         let reply = xrefs_for(ctx, t, "none", "all", "none")?;
         if ctx.json {
             println!("{}", serde_json::to_string(&reply)?);
         } else {
-            total += print_anchors(&reply, "reference", &format!("ref {name} [{}]", sig_of(t)), filter, ctx.limit);
+            total += print_anchors(&reply, "reference", &format!("ref {name} [{}]", label(ctx, t)), filter, ctx.limit);
         }
     }
     if !ctx.json && total == 0 {
@@ -302,14 +339,14 @@ pub fn references(ctx: &Ctx, name: &str, substr: bool, filter: &Filter) -> Resul
 }
 
 pub fn callers(ctx: &Ctx, name: &str, substr: bool, filter: &Filter) -> Result<()> {
-    let tickets = resolve(ctx, name, substr)?;
+    let tickets = resolve(ctx, name, substr, filter, ctx.limit)?;
     let mut total = 0;
     for t in &tickets {
         let reply = xrefs_for(ctx, t, "none", "call", "direct")?;
         if ctx.json {
             println!("{}", serde_json::to_string(&reply)?);
         } else {
-            total += print_anchors(&reply, "caller", &format!("callers {name} [{}]", sig_of(t)), filter, ctx.limit);
+            total += print_anchors(&reply, "caller", &format!("callers {name} [{}]", label(ctx, t)), filter, ctx.limit);
             total += print_anchors(&reply, "reference", "  (call sites)", filter, ctx.limit);
         }
     }
@@ -366,7 +403,7 @@ fn edge_targets(ctx: &Ctx, ticket: &str, kinds: &[&str]) -> Result<Vec<String>> 
 pub fn inheritance(ctx: &Ctx, name: &str, substr: bool, sub: bool, filter: &Filter) -> Result<()> {
     let owned = inherit_kinds(sub);
     let kinds: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
-    let tickets = resolve(ctx, name, substr)?;
+    let tickets = resolve(ctx, name, substr, filter, ctx.limit)?;
     let verb = if sub { "sub" } else { "super" };
     let mut total = 0;
     for t in &tickets {
@@ -382,9 +419,9 @@ pub fn inheritance(ctx: &Ctx, name: &str, substr: bool, sub: bool, filter: &Filt
                 continue;
             }
             if total == 0 {
-                println!("{verb} {name} [{}]", sig_of(t));
+                println!("{verb} {name} [{}]", label(ctx, t));
             }
-            println!("  {}  [{}]", sig_of(&tt), p);
+            println!("  {}  [{}]", label(ctx, &tt), p);
             total += 1;
             if total >= ctx.limit {
                 break;
@@ -494,41 +531,45 @@ fn cg_next(ctx: &Ctx, ticket: &str, dir: &str) -> Result<Vec<String>> {
     })
 }
 
-/// `callgraph NAME --direction up|down|both --depth N` — transitive walk,
-/// printed as an indented tree with cycle detection.
-pub fn callgraph(ctx: &Ctx, name: &str, substr: bool, direction: &str, depth: usize, filter: &Filter) -> Result<()> {
+/// `callgraph NAME --direction up|down|both --depth N` — BFS forest like
+/// scry2: each node has an id and a parent id (roots have parent -1); every
+/// symbol appears once (first discoverer is its parent), which is cycle-safe.
+#[allow(clippy::too_many_arguments)]
+pub fn callgraph(ctx: &Ctx, name: &str, substr: bool, direction: &str, depth: usize,
+                 max_syms: usize, root_limit: usize, filter: &Filter) -> Result<()> {
     if !matches!(direction, "up" | "down" | "both") {
         bail!("--direction must be up|down|both");
     }
-    let mut visited = std::collections::HashSet::new();
-    for t in resolve(ctx, name, substr)? {
-        println!("callgraph {name} ({direction}, depth {depth}) [{}]", sig_of(&t));
-        cg_walk(ctx, &t, direction, depth, 1, &mut visited, filter)?;
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn cg_walk(
-    ctx: &Ctx,
-    ticket: &str,
-    dir: &str,
-    max_depth: usize,
-    cur: usize,
-    visited: &mut std::collections::HashSet<String>,
-    filter: &Filter,
-) -> Result<()> {
-    if cur > max_depth || !visited.insert(ticket.to_string()) {
-        return Ok(());
-    }
-    let mut seen = std::collections::HashSet::new();
-    for nx in cg_next(ctx, ticket, dir)? {
-        let p = path_of(&nx);
-        if !seen.insert(nx.clone()) || !filter.keep(&p) {
-            continue;
+    // node = (ticket, parent_id, depth)
+    let mut nodes: Vec<(String, i64, usize)> = Vec::new();
+    let mut id: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for t in resolve(ctx, name, substr, filter, root_limit)? {
+        if !id.contains_key(&t) {
+            id.insert(t.clone(), nodes.len());
+            nodes.push((t, -1, 0));
         }
-        println!("{}{}  [{}]", "  ".repeat(cur), sig_of(&nx), p);
-        cg_walk(ctx, &nx, dir, max_depth, cur + 1, visited, filter)?;
+    }
+    let mut qi = 0;
+    while qi < nodes.len() && nodes.len() < max_syms {
+        let (ticket, _, ndepth) = nodes[qi].clone();
+        if ndepth < depth {
+            for nx in cg_next(ctx, &ticket, direction)? {
+                if !filter.keep(&path_of(&nx)) || id.contains_key(&nx) {
+                    continue;
+                }
+                id.insert(nx.clone(), nodes.len());
+                nodes.push((nx, qi as i64, ndepth + 1));
+                if nodes.len() >= max_syms {
+                    break;
+                }
+            }
+        }
+        qi += 1;
+    }
+    println!("callgraph {name} ({direction}, depth {depth}) — {} nodes", nodes.len());
+    for (i, (ticket, parent, ndepth)) in nodes.iter().enumerate() {
+        let p = if *parent < 0 { "-".to_string() } else { parent.to_string() };
+        println!("[{i}] parent={p} depth={ndepth}  {}  [{}]", label(ctx, ticket), path_of(ticket));
     }
     Ok(())
 }
@@ -556,7 +597,7 @@ pub fn identifier(ctx: &Ctx, name: &str, substr: bool) -> Result<()> {
 }
 
 pub fn edges(ctx: &Ctx, target: &str, kinds: Option<&str>) -> Result<()> {
-    for t in resolve(ctx, target, false)? {
+    for t in resolve(ctx, target, false, &Filter::default(), 0)? {
         let mut c = ctx.kythe();
         c.arg("edges");
         if let Some(k) = kinds {
@@ -569,7 +610,7 @@ pub fn edges(ctx: &Ctx, target: &str, kinds: Option<&str>) -> Result<()> {
 }
 
 pub fn nodes(ctx: &Ctx, target: &str) -> Result<()> {
-    for t in resolve(ctx, target, false)? {
+    for t in resolve(ctx, target, false, &Filter::default(), 0)? {
         let mut c = ctx.kythe();
         c.arg("nodes").arg(&t);
         run_passthrough(c)?;
@@ -645,6 +686,7 @@ pub fn repl(ctx: &Ctx) -> Result<()> {
                 "--substr" => {}
                 "--in" => { i += 1; filter.in_ = toks.get(i).map(|s| s.to_string()); }
                 "--not-in" => { i += 1; filter.not_in = toks.get(i).map(|s| s.to_string()); }
+                "--def-in" => { i += 1; filter.def_in = toks.get(i).map(|s| s.to_string()); }
                 "--direction" => { i += 1; if let Some(d) = toks.get(i) { direction = d.to_string(); } }
                 "--depth" => { i += 1; if let Some(d) = toks.get(i) { depth = d.parse().unwrap_or(3); } }
                 other if name.is_none() => name = Some(other.to_string()),
@@ -662,7 +704,7 @@ pub fn repl(ctx: &Ctx) -> Result<()> {
             "callers" => callers(ctx, &name, substr, &filter),
             "super" => inheritance(ctx, &name, substr, false, &filter),
             "sub" => inheritance(ctx, &name, substr, true, &filter),
-            "callgraph" => callgraph(ctx, &name, substr, &direction, depth, &filter),
+            "callgraph" => callgraph(ctx, &name, substr, &direction, depth, 200, 16, &filter),
             "identifier" | "names" => identifier(ctx, &name, substr || verb == "names"),
             "edges" => edges(ctx, &name, None),
             "nodes" => nodes(ctx, &name),

@@ -54,8 +54,8 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
-    /// Cap on results / substring matches.
-    #[arg(long, global = true, default_value = "50")]
+    /// Cap on results / substring matches. `--max-hits` is a scry2-style alias.
+    #[arg(long, global = true, default_value = "50", visible_alias = "max-hits")]
     limit: usize,
 
     #[command(subcommand)]
@@ -174,6 +174,8 @@ enum Cmd {
         in_: Option<String>,
         #[arg(long = "not-in", value_name = "SUBSTR")]
         not_in: Option<String>,
+        #[arg(long = "def-in", value_name = "SUBSTR")]
+        def_in: Option<String>,
     },
     /// callers NAME — call sites targeting a function.
     Callers {
@@ -184,6 +186,8 @@ enum Cmd {
         in_: Option<String>,
         #[arg(long = "not-in", value_name = "SUBSTR")]
         not_in: Option<String>,
+        #[arg(long = "def-in", value_name = "SUBSTR")]
+        def_in: Option<String>,
     },
     /// super NAME — direct supertypes (extends / overrides / satisfies).
     Super {
@@ -214,10 +218,16 @@ enum Cmd {
         direction: String,
         #[arg(long, default_value = "3")]
         depth: usize,
+        #[arg(long = "max-syms", default_value = "200")]
+        max_syms: usize,
+        #[arg(long = "root-limit", default_value = "16")]
+        root_limit: usize,
         #[arg(long = "in", value_name = "SUBSTR")]
         in_: Option<String>,
         #[arg(long = "not-in", value_name = "SUBSTR")]
         not_in: Option<String>,
+        #[arg(long = "def-in", value_name = "SUBSTR")]
+        def_in: Option<String>,
     },
     /// identifier NAME — list tickets a name resolves to (scry3 index).
     Identifier {
@@ -401,28 +411,28 @@ fn main() -> Result<()> {
             })
         }
         Cmd::Def { name, substr, in_, not_in } => {
-            let f = query::Filter { in_: in_.clone(), not_in: not_in.clone() };
+            let f = query::Filter { in_: in_.clone(), not_in: not_in.clone(), def_in: None };
             query::def(&build_ctx(&cli)?, name, *substr, &f)
         }
-        Cmd::Ref { name, substr, in_, not_in } => {
-            let f = query::Filter { in_: in_.clone(), not_in: not_in.clone() };
+        Cmd::Ref { name, substr, in_, not_in, def_in } => {
+            let f = query::Filter { in_: in_.clone(), not_in: not_in.clone(), def_in: def_in.clone() };
             query::references(&build_ctx(&cli)?, name, *substr, &f)
         }
-        Cmd::Callers { name, substr, in_, not_in } => {
-            let f = query::Filter { in_: in_.clone(), not_in: not_in.clone() };
+        Cmd::Callers { name, substr, in_, not_in, def_in } => {
+            let f = query::Filter { in_: in_.clone(), not_in: not_in.clone(), def_in: def_in.clone() };
             query::callers(&build_ctx(&cli)?, name, *substr, &f)
         }
         Cmd::Super { name, substr, in_, not_in } => {
-            let f = query::Filter { in_: in_.clone(), not_in: not_in.clone() };
+            let f = query::Filter { in_: in_.clone(), not_in: not_in.clone(), def_in: None };
             query::inheritance(&build_ctx(&cli)?, name, *substr, false, &f)
         }
         Cmd::Sub { name, substr, in_, not_in } => {
-            let f = query::Filter { in_: in_.clone(), not_in: not_in.clone() };
+            let f = query::Filter { in_: in_.clone(), not_in: not_in.clone(), def_in: None };
             query::inheritance(&build_ctx(&cli)?, name, *substr, true, &f)
         }
-        Cmd::Callgraph { name, substr, direction, depth, in_, not_in } => {
-            let f = query::Filter { in_: in_.clone(), not_in: not_in.clone() };
-            query::callgraph(&build_ctx(&cli)?, name, *substr, direction, *depth, &f)
+        Cmd::Callgraph { name, substr, direction, depth, max_syms, root_limit, in_, not_in, def_in } => {
+            let f = query::Filter { in_: in_.clone(), not_in: not_in.clone(), def_in: def_in.clone() };
+            query::callgraph(&build_ctx(&cli)?, name, *substr, direction, *depth, *max_syms, *root_limit, &f)
         }
         Cmd::Identifier { name, substr } => query::identifier(&build_ctx(&cli)?, name, *substr),
         Cmd::Names { prefix } => query::identifier(&build_ctx(&cli)?, prefix, true),

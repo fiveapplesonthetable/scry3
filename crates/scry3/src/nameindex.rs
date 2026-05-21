@@ -181,6 +181,8 @@ pub(crate) fn write_index(set: &BTreeSet<(String, String)>, out: &Path) -> Resul
 /// builder, so exact lookup is a binary search.
 pub struct NameIndex {
     rows: Vec<(String, String)>,
+    /// ticket → shortest (canonical) name, for reverse display resolution.
+    by_ticket: std::collections::HashMap<String, String>,
 }
 
 impl NameIndex {
@@ -198,7 +200,24 @@ impl NameIndex {
         if !rows.windows(2).all(|w| w[0] <= w[1]) {
             rows.sort();
         }
-        Ok(NameIndex { rows })
+        let mut by_ticket: std::collections::HashMap<String, String> =
+            std::collections::HashMap::with_capacity(rows.len());
+        for (n, t) in &rows {
+            // Prefer the shortest name per ticket (canonical FQN over a
+            // descriptor-suffixed alias).
+            match by_ticket.get(t) {
+                Some(cur) if cur.len() <= n.len() => {}
+                _ => {
+                    by_ticket.insert(t.clone(), n.clone());
+                }
+            }
+        }
+        Ok(NameIndex { rows, by_ticket })
+    }
+
+    /// Resolve a ticket back to a human name (shortest known), if indexed.
+    pub fn name_of(&self, ticket: &str) -> Option<&str> {
+        self.by_ticket.get(ticket).map(|s| s.as_str())
     }
 
     /// Number of (name, ticket) rows.
